@@ -331,7 +331,7 @@ method:
 async completion fn read_with_timeout(
     reader: &mut Reader, buffer: &mut [u8], timeout: Duration
 ) -> Result<usize, IoError> {
-    runtime.with_timeout(timeout, async completion move {
+    runtime::with_timeout(timeout, async completion move {
         reader.read_with_uring(&buffer[offset..])
     }).await
 }
