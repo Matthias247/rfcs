@@ -93,8 +93,8 @@ as described in the original example.
 
 For some function it is really important that it actually runs to completion.
 The reason is typically that this function forms an atomic transaction. If the
-transaction it cancelled in the middle, the objects that this transaction is
-manipulating end up in an invalid state.
+transaction is cancelled in the middle, the objects that this transaction is
+manipulating will end up in an invalid state.
 
 With todays `async fn`, implementors of such a function do not have any guarantee
 that their code runs to completion. The calling/polling side is outside of the view
@@ -287,7 +287,7 @@ async completion fn read_all_with_uring(
 ) -> Result<(), IoError> {
     let mut offset = 0;
     while offset != buffer.len() {
-        let read = reader.read_with_uring(&buffer[offset..], cancel_token)?;
+        let read = reader.read_with_uring(&buffer[offset..], cancel_token).await?;
         offset += read;
     }
     Ok(())
@@ -429,7 +429,7 @@ experience the complexity of a variety of different behaviors in async functions
 They already need to be aware about the current cancellation behavior. They will
 also need to be aware that cancelling some of the current async functions (e.g.
 the proposed `scope` function for structured concurrency support in tokio) will
-will lead to `panic`s or `abort`s, since there exists not way to handle a
+will lead to `panic`s or `abort`s, since there exists no way to handle a
 cancellation in a reasonable fashion. By introducing run-to-completion function
 we will at least gain a feature on type-system level that will help to disambiguate
 functions which can safely be synchronously cancelled and ones which need to
@@ -469,7 +469,7 @@ based operations. Those already exist in other languages (C++, Zig, C#, Kotlin,
 etc), but not yet in Rust.
 
 `async completion fn` will also introduce an async function type which behaves
-more simliar to normal functions that current `async fn`s do. It might therefore
+more similar to normal functions than current `async fn`s do. It might therefore
 have been interesting to see `async completion fn` as the new "default" async
 function type. However this is not possible anymore, since `async fn` is already
 stabilized.
