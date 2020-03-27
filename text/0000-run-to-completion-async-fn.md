@@ -315,7 +315,7 @@ async completion fn read_with_timeout(
 ) -> Result<usize, IoError> {
     select! {
         read_result = reader.read_with_uring(&buffer[offset..]) => read_result
-        _ = timer.delay_for(timeout) => Err(IoError::Timeout)
+        _ = runtime::timer::delay_for(timeout) => Err(IoError::Timeout)
     }
 }
 ```
