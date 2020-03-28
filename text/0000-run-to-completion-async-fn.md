@@ -31,12 +31,16 @@ gaps, which the new async function type aims to fill.
 ## Support for completion based operations
 
 Todays `Future`s do not allow us to support completion based operations in
-a flexible and safe fashion. Completion based operations are operations which
-follow the follow sequence:
-1. we start an asynchronous request, and provide references to all necessary
+a flexible and safe fashion.
+
+**Completion based operations are operations which follow the follow sequence:**
+1. We start an asynchronous request, and provide references to all necessary
   resources to the engine which executes the requests
-2. we later receive a notification from the engine that the request finished
-3. we acquire the result of the operation, which finalizes the operation.
+2. We later receive a notification from the engine that the request finished.
+  This notification can be delivered in a variety of ways: It could be callback
+  issued on a background thread, a signal or interrupt handler,
+  or it could be dequeued through a completion port/queue on an arbitrary thread.
+3. We acquire the result of the operation, which finalizes the operation.
   after this step all resources which had been borrowed for the duratino of the
   async operation can be reused.
 
@@ -89,10 +93,46 @@ original C version of those APIs.
 By introducing run-to-completion async functions, we can model the APIs exactly
 as described in the original example.
 
+The following example shows the difference in complexity for reading a fixed
+amount of bytes into a contiguous buffer using both APIs:
+
+```rust
+/// Read `n` bytes using owned buffers into a contiguous buffer
+async fn read_n_bytes(n: usize) -> Result<Bytes, IoError> {
+    let mut buffer: BytesMut = vec![0; n].into();
+    let offset = 0;
+
+    while offset != n {
+        let read_buf = buffer.split_at(offset);
+        let (bytes_transferred, read_buf) = engine.read(read_buf).await?;
+        offset += bytes_transferred;
+        buffer = buffer.unsplit(read_buf);
+    }
+
+    Ok(buffer.freeze())
+}
+
+/// Read `n` bytes using referenced buffers into a contiguous buffer.
+/// Note that we could also return an owned buffer as the aggregate result.
+/// However in order to showcase the lowest-overhead variant of this method it
+/// accepts a borrowed buffer.
+async fn read_n_bytes(buffer: &mut [u8]) -> Result<(), IoError> {
+    let offset = 0;
+
+    while offset != buffer.len() {
+        let bytes_transferred = engine.read(&mut read_buf[offset..]).await?;
+        offset += bytes_transferred;
+    }
+
+    Ok(())
+}
+```
+
+
 ## Offer protection against accidental returns
 
-For some function it is really important that it actually runs to completion.
-The reason is typically that this function forms an atomic transaction. If the
+For certain functions it is really important that they actually runs to completion.
+The reason is typically that the function forms an atomic transaction. If the
 transaction is cancelled in the middle, the objects that this transaction is
 manipulating will end up in an invalid state.
 
@@ -129,18 +169,28 @@ handled properly.
 # Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-The proposal adds 2 new items to Rust:
+The proposal adds 3 new items to Rust:
 - A new `Future` type, which will reside in `core::task`. In the remains of this
   document we will refer to this type as `RunToCompletionFuture`.
   This is a working name, the actual name could be different and more concise.
 - A new kind of asynchronous function which is guaranteed to run to completion.
   The type of function needs to be distinguishable from a regular async function.
-  For the further explanation we will assume a modifer `completion` will be used
-  to distinguish this function type from a regular `async fn`. However this is
-  also a tool to present the concept. Any other kind of syntax could be used to
-  disambiguate the types. Calling an `async completion fn` will produce a
-  `RunToCompletionFuture`, whose associated `Output` type is the return type of
-  the function.
+  For the further explanation we will assume an attribute `#[completion]` will
+  be used to distinguish this function type from a regular `async fn`.
+  However this is also a tool to present the concept.
+  Any other kind of syntax could be used to disambiguate the types.
+  Calling an `#[completion] async fn` will produce a `RunToCompletionFuture`,
+  whose associated `Output` type is the return type of the function.
+  Examples for other mechanisms are:
+  - Modifiers to the `async` keyword, e.g. `async completion fn`
+  - A new keyword which depicts an async function which runs to completion, e.g.
+    `asyncc fn`.
+- A variant of `async` blocks for blocks which have run to completion semantics.
+  Those blocks will get translated into `RunToCompletionFuture`s.
+  The method to distinguish those from regular `async` blocks should follow the
+  mechansim to distinguish `async` fns. In the further scope of this document
+  therefore an `#[completion] async {}` block syntax will be used to describe
+  a block which gets transformed into a `RunToCompletionFuture`.
 
 In a similar fashion as the function
 
@@ -149,6 +199,7 @@ async fn hello_twice() -> IoResult {
     out.writeln("hello world").await;
     timer.delay(Duration::from_millis(2000)).await;
     out.writeln("hello world").await;
+    Ok(())
 }
 ```
 
@@ -161,10 +212,12 @@ fn hello_twice() -> Future<Output=IoResult>
 our new run to completion function
 
 ```rust
-async completion fn hello_twice_complete() -> IoResult {
+#[completion]
+async fn hello_twice_complete() -> IoResult {
     out.writeln("hello world").await;
     timer.delay(Duration::from_millis(2000)).await;
     out.writeln("hello world").await;
+    Ok(())
 }
 ```
 
@@ -180,16 +233,16 @@ observe a single line of output - as long as the process does not get aborted.
 
 ## `await` operator usage
 
-The `await` operator can be used inside an `async completion fn` to await
-`Future`s as well as `RunToCompletionFuture`s. This means:
-- `async completion fn`s will be able to `.await` `async completion fn`s,
+The `await` operator can be used inside an `#[completion] async fn` to
+await `Future`s as well as `RunToCompletionFuture`s. This means:
+- `#[completion] async fn`s will be able to `.await` `#[completion] async fn`s,
   `async fn`s and call synchronous `fn`s:
   ```rust
-  async completion fn f1() {}
+  #[completion] async fn f1() {}
   async fn f2() {}
   fn f3() {}
 
-  async completion fn example() {
+  #[completion] async fn example() {
       f1().await; // This is OK
       f2().await; // This is also OK
       f3(); // And this also
@@ -202,7 +255,7 @@ The `await` operator can be used inside an `async completion fn` to await
   to call a function which must run to completion - and which therefore can not
   be suspended without being resumed later on.
   ```rust
-  async completion fn f1() {}
+  #[completion] async fn f1() {}
   async fn f2() {}
   fn f3() {}
 
@@ -213,7 +266,35 @@ The `await` operator can be used inside an `async completion fn` to await
   }
   ```
 
-## `async completion fn` support in runtimes
+## `#[completion] async` blocks
+
+Users can not only `.await` `Future`s in async functions, but also in `async`
+blocks. In fact any `async fn` will get translated into an `async` block as a
+step in the compilation process.
+
+For example the function defined above will get translated by the compiler into:
+
+```rust
+fn hello_twice_complete() -> RunToCompletionFuture<Output=IoResult> {
+    #[completion] async move {
+        out.writeln("hello world").await;
+        timer.delay(Duration::from_millis(2000)).await;
+        out.writeln("hello world").await;
+        Ok(())
+    }
+}
+```
+
+Therefore it is important that also a variant of `async` blocks is available
+which allow users to `.await` `RunToCompletionFuture`s. The rules around what
+`Future` type can be awaited in an `async` block follow the rules for async
+functions.
+
+In fact the compiler can implement the validation purely for async blocks,
+since every `async fn` will get translated into one of those blocks as
+part of the compilation process.
+
+## `#[completion] async fn` support in runtimes
 
 It is expected that runtimes (like [Tokio](https://tokio.rs/) or
 [async-std](https://async.rs/)) would either add an additional `spawn` function
@@ -226,7 +307,7 @@ on those runtimes.
 
 ## Cancellation support for run to completion functions
 
-While an `async completion fn` can not be forcefully cancelled - by dropping the
+While an `#[completion] async fn` can not be forcefully cancelled - by dropping the
 `RunToCompletionFuture` it produced - they can still be cancelled in a cooperative
 fashion. Cooperative cancellation consists of 3 phases:
 1. Cancellation is signalled to the still running asynchronous function. This can
@@ -242,7 +323,10 @@ The following example demonstrates cooperative cancellation with the use of a
 `CancellationToken`:
 
 ```rust
-async completion fn func_with_cancellation_support(&mut self, cancel_token: &CancellationToken) -> Option<i32> {
+#[completion]
+async fn func_with_cancellation_support(
+    &mut self, cancel_token: &CancellationToken
+) -> Option<i32> {
     let mut last_value = None;
     loop {
         select! {
@@ -272,7 +356,8 @@ request while the operation is still pending. The signature of such a method
 would e.g. be
 
 ```rust
-async completion fn read_with_uring(
+#[completion]
+async fn read_with_uring(
     &mut self, buffer: &mut [u8], cancel_token: &CancellationToken
 ) -> Result<usize, IoError>;
 ```
@@ -282,7 +367,8 @@ to occur within the runtime which provides the method. Most end user code is
 simply expected to forward the `CancellationToken`:
 
 ```rust
-async completion fn read_all_with_uring(
+#[completion]
+async fn read_all_with_uring(
     reader: &mut Reader, buffer: &mut [u8], cancel_token: &CancellationToken
 ) -> Result<(), IoError> {
     let mut offset = 0;
@@ -300,17 +386,18 @@ added to the [`std::task::Context`](https://doc.rust-lang.org/1.42.0/std/task/st
 type in the future. Such a mechanism is however outside of the scope of this
 proposal.
 
-## Timeout handling with `async completion fn`
+## Timeout handling with `#[completion] async fn`
 
 Another common case where a `select!` like functionality is needed besides
 checking for cancellation is for timeouts. The current `select!` macro could not
-be used to time-out on `async completion fn`, since `select!` does not drive
+be used to time-out on `#[completion] async fn`, since `select!` does not drive
 the aborted branches to completion.
 
 **Therefore the following example is not valid**:
 
 ```rust
-async completion fn read_with_timeout(
+#[completion]
+async fn read_with_timeout(
     reader: &mut Reader, buffer: &mut [u8], timeout: Duration
 ) -> Result<usize, IoError> {
     select! {
@@ -324,14 +411,15 @@ Instead of this, a new mechanism is required which guarantees that the non
 timeout branches will be cooperatively cancelled and driven to completion after
 the timeout occured. That mechanism can be provided by runtimes in a variety of
 fashions. They could either provide a variant of the `select!` macro which is
-usable for `async completion fn`. Or they could provide a dedicated timeout
+usable for `#[completion] async fn`. Or they could provide a dedicated timeout
 method:
 
 ```rust
-async completion fn read_with_timeout(
+#[completion]
+async fn read_with_timeout(
     reader: &mut Reader, buffer: &mut [u8], timeout: Duration
 ) -> Result<usize, IoError> {
-    runtime::with_timeout(timeout, async completion move {
+    runtime::with_timeout(timeout, #[completion] async move {
         reader.read_with_uring(&buffer[offset..])
     }).await
 }
@@ -341,25 +429,50 @@ In this example the necessary cancellation token is forwarded through a runtime
 internal mechanism (e.g. task-local storage) from the timer to the read call.
 However it could also be explicitly passed.
 
+This example also demonstrates the need for `#[completion] async` blocks.
+Without those, we could not pass the actual read method to `runtime::with_timeout`.
+
 # Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
 
-As described earlier, an `async completion fn` would be transformed into a
+As described earlier, an `#[completion] async fn` would be transformed into a
 `RunToCompletionFuture`.
 
 ## async transformation
 
-The async transformation itself would happen mostly like the current `async fn` transformation. There is no need for difference, apart from generating a
-different return type.
+The compiler will need to desugar a function with a signature of
 
-The compiler will mainly need to introduce an additional type check, which allows
-`async completion fn`s to `await` other `async completion fn`s, while `async fn`s
-can not await those.
+```rust
+#[completion] async fn example(Args) -> Res {
+    body
+}
+```
+
+into
+
+```rust
+fn example(Args) -> RunToCompletionFuture<Output=Res> {
+    #[completion] async move {
+        body
+    }
+}
+```
+
+This requires the compiler to forward the #[completion] attribute to the
+generated async block.
+
+The translation of async block into a generator/state-machine is expected to be
+mostly identical as for existing async blocks. The only difference should be
+generating a different return type.
+
+Besides this the compiler will need to apply a slightly modified type checking
+behavior for `#[completion] async` blocks compared to `await` blocks, since
+only `#[completion] async` blocks are allowed to `.await` `RunToCompletionFuture`s.
 
 ## `RunToCompletionFuture` type definition
 
 This RFC proposes to keep `RunToCompletionFuture` closely aligned to the current
-`Future` type by defining it in the following fashion.
+`Future` type by defining it in the following fashion:
 
 ```rust
 pub trait RunToCompletionFuture {
@@ -395,11 +508,12 @@ to poll it either never or exactly until it returns `Ready` once.
 
 This contract guarantees that the function which is represented by this
 `RunToCompletionFuture` gets driven to completion.
-If an `async completion fn` would internally call another `async completion fn`
-it would correspond to a `RunToCompletionFuture` which needs to poll another
-`RunToCompletionFuture`. Since the poller of the outer `RunToCompletionFuture`
-promises to drive it to completion, this `RunToCompletionFuture` can also promise
-to the inner `RunToCompletionFuture` that it will drive it to completion.
+If an `#[completion] async fn` would internally call another
+`#[completion] async fn` it would correspond to a `RunToCompletionFuture` which
+needs to poll another `RunToCompletionFuture`. Since the poller of the outer
+`RunToCompletionFuture` promises to drive it to completion, this
+`RunToCompletionFuture` can also promise to the inner `RunToCompletionFuture`
+that it will drive it to completion.
 
 While different designs of the trait might be possible - including ones which e.g.
 use different types for starting the operation and driving the operation, staying
@@ -411,6 +525,11 @@ close the original `Future` trait has some benefits:
   e.g. for IO completion based TCP streams - which still support dynamic dispatch.
 - The task and waker system are completely unmodified, and will work the same
   fashion for both `Future` types.
+- The amount of work to add support for this new trait into runtimes is minimal.
+  If those did not allow to cancel spawned tasks after starting them, they would
+  mainly need to update the accepted type of the `spawn` method to
+  `RunToCompletionFuture` and apply the `unsafe` block in order to call `poll`
+  on the Future.
 
 # Drawbacks
 [drawbacks]: #drawbacks
@@ -435,6 +554,19 @@ we will at least gain a feature on type-system level that will help to disambigu
 functions which can safely be synchronously cancelled and ones which need to
 run to completion.
 
+### Additional verbosity
+
+The syntax `#[completion] async fn` is rather verbose. Since the requirement for
+completion functions will bubble up the call chain, it is expected that a lot
+of functions would need to carry the attribute. A more concise way to
+disambuigate the function types would be preferable, but might not be achievable
+within the rules of Rust 2018.
+
+However it is possible that IDE tools like rust-analyzer or Intellij-Rust could
+offer help - e.g. by auto-completing the attribute or rendering it in a more
+concise notation - in a similar fashion as IntelliJ renders some anonymous class
+instantiations in lambda syntax.
+
 ### The new trait is `unsafe` by default
 
 The new proposed trait requires the implementation of an `unsafe` method. The
@@ -453,7 +585,7 @@ level primitives like IO completion based socket types would need to be implemen
 by runtime authors - but those will need unsafe code anyway (they need to pass
 raw pointers to underlying C code or the kernel for an amount of time which can
 not be checked by lifetimes). Most users are purely expected to use high level
-`async completion fn`s, which will not require unsafe code. 
+`#[completion] async fn`s, which will not require unsafe code. 
 
 # Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
@@ -468,9 +600,9 @@ The mechanism will allow us to provide true zero cost abstractions for completio
 based operations. Those already exist in other languages (C++, Zig, C#, Kotlin,
 etc), but not yet in Rust.
 
-`async completion fn` will also introduce an async function type which behaves
+`#[completion] async fn` will also introduce an async function type which behaves
 more similar to normal functions than current `async fn`s do. It might therefore
-have been interesting to see `async completion fn` as the new "default" async
+have been interesting to see `#[completion] async fn` as the new "default" async
 function type. However this is not possible anymore, since `async fn` is already
 stabilized.
 
@@ -489,7 +621,8 @@ internally.
 ## Relation to `poll_drop`
 
 A proposal which might be related is the one about
-[`async drop / asynchronous destructors`](https://boats.gitlab.io/blog/post/poll-drop/). This blog post proposes to a `poll_drop` method to certain types,
+[`async drop / asynchronous destructors`](https://boats.gitlab.io/blog/post/poll-drop/).
+This blog post proposes to a `poll_drop` method to certain types,
 which allows to run asynchronous code also in their cleanup phase.
 However this mechanism would still not meet the motivations for this proposal.
 
@@ -498,12 +631,13 @@ Since it is just an optional method on types, it might never be called.
 This is especially likely to happen if `poll_drop` is just used deep within the
 call hierarchy, while the code around it is not aware of it.
 
-Any code which is simliar to [`select!`](https://docs.rs/futures/0.3.4/futures/macro.select.html), and which was not converted to be made aware of `poll_drop`
+Any code which is similiar to [`select!`](https://docs.rs/futures/0.3.4/futures/macro.select.html),
+and which was not converted to be made aware of `poll_drop`
 could cause `poll_drop` not be called. Therefore `poll_drop` is not a mechanism
 which e.g. allows us to add a safe Rust APIs around async completion based
 mechanism.
 
-`async completion fn` in comparison enforces through the type system that
+`#[completion] async fn` in comparison enforces through the type system that
 methods will run to completion, and any necessary cleanup code is run before 
 resources are released.
 
@@ -552,9 +686,10 @@ successfully deployed in these environments.
 This RFC leaves the concrete syntax and naming for the new function and Future
 type open. For the `Future` any name could be used.
 
-For the new `async completion fn` syntax, a syntax needs to be chosen that
-is allowed within the Rust 2018 rules. These might not allow for a new keyword
-like `completion`.
+For the new async fn syntax, a syntax needs to be chosen that is allowed within
+the Rust 2018 rules. The attribute based differentiation seems to be allowed
+according to the understand of the author, while a new keyword like `completion`
+is problematic.
 
 ## Sub-typing relationships between `Future` and `RunToCompletionFuture`
 
@@ -588,7 +723,7 @@ in the future.
 
 This section reenumerates those:
 - In order to forward `CancellationToken`s, which allow for cooperative
-  cancellation in `async completion fn`s, the
+  cancellation in `#[completion] async fn`s, the
   [`std::task::Context`](https://doc.rust-lang.org/1.42.0/std/task/struct.Context.html)
   type could be extended.
 - A standardization of `CancellationToken` could also be taken into consideration,
@@ -600,3 +735,7 @@ This section reenumerates those:
   require run to completion semantics and cooperative cancellation.
 - `defer` or `finally` blocks could help to execute cleanup code in a unified
   fashion for synchronous and asynchronous code.
+
+Besides this, a future Edition of Rust could adopt a different keyword for
+async completion functions in order to reduce the verbosity. This should be done
+after carefully studying the usage of the various `async fn` types.
