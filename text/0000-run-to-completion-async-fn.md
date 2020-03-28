@@ -440,6 +440,11 @@ As described earlier, an `#[completion] async fn` would be transformed into a
 
 ## async transformation
 
+This section describes the necessary changes for the compiler in order to
+support the proposed async run to completion functions:
+
+### `async fn` -> `async` block transformation
+
 The compiler will need to desugar a function with a signature of
 
 ```rust
@@ -461,13 +466,19 @@ fn example(Args) -> RunToCompletionFuture<Output=Res> {
 This requires the compiler to forward the #[completion] attribute to the
 generated async block.
 
-The translation of async block into a generator/state-machine is expected to be
-mostly identical as for existing async blocks. The only difference should be
-generating a different return type.
+### `async` block -> generator transformation
+
+The translation of an async block into a generator/state-machine is expected to
+be mostly identical to the translation for existing async blocks.
+The only difference should be generating a different return type.
+
+### Type checks for `async` blocks
 
 Besides this the compiler will need to apply a slightly modified type checking
-behavior for `#[completion] async` blocks compared to `await` blocks, since
-only `#[completion] async` blocks are allowed to `.await` `RunToCompletionFuture`s.
+behavior for `#[completion] async` blocks compared to `await` blocks:
+- Inside `#[completion] async` blocks users are allowed to `.await`
+  `RunToCompletionFuture`s and `Future`s.
+- Inside `async` blocks users are only allowed to `.await` `Future`s.
 
 ## `RunToCompletionFuture` type definition
 
