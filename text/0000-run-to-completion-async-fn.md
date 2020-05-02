@@ -730,23 +730,94 @@ where F: Future<Output=T> {
 [future-possibilities]: #future-possibilities
 
 The RFC outlines a few additional ideas which will be interesting to look at
-in the future.
+in the future:
 
-This section reenumerates those:
-- In order to forward `CancellationToken`s, which allow for cooperative
-  cancellation in `#[completion] async fn`s, the
-  [`std::task::Context`](https://doc.rust-lang.org/1.42.0/std/task/struct.Context.html)
-  type could be extended.
-- A standardization of `CancellationToken` could also be taken into consideration,
-  instead of leaving its definition purely to runtime implementations or other
-  independent libraries.
-- A standardization of IO traits for completion based IO objects (e.g. sockets
-  and files backed by `io_uring`) could be taken into consideration. Those would
-  would be variants of the proposed `AsyncRead/AsyncWrite` traits, which would
-  require run to completion semantics and cooperative cancellation.
-- `defer` or `finally` blocks could help to execute cleanup code in a unified
-  fashion for synchronous and asynchronous code.
+## Keyword for async run to completion function
 
-Besides this, a future Edition of Rust could adopt a different keyword for
-async completion functions in order to reduce the verbosity. This should be done
+A future Edition of Rust could adopt a different keyword for async completion
+functions in order to reduce the verbosity. This should be done
 after carefully studying the usage of the various `async fn` types.
+
+## Traits for completion based IO
+
+With general support for async functions which run to completion,
+a standardization of IO traits for completion based IO objects (e.g. sockets
+and files backed by `io_uring`) could be taken into consideration. Those would
+would be variants of the proposed `AsyncRead/AsyncWrite` traits, which would
+require run to completion semantics and cooperative cancellation.
+
+A modification of the `AsyncWrite` trait, which follows the idea of the new
+`RunToCompletionFuture` trait:
+
+```rust
+pub trait AsyncRunToCompletionWrite {
+    unsafe fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8])
+        -> Poll<Result<usize>>;
+
+    unsafe fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>>;
+
+    unsafe fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>>;
+
+    fn cancel_current_operation(self: &Self);
+}
+```
+
+All `poll` functions would become unsafe. Their new contract is here also that
+callers must call `poll` exactly with the same data until `Poll::Ready` is
+returned. Callers are not allowed to drop the object before the pending IO
+operation had been completed.
+
+In order to support cooperative cancellation some kind of cancel method can be
+added. The implementation of this could for example forward the cancellation
+request to the Kernel in case of a `io_uring` or `IOCP` operation.
+
+The initiation of a cancellation would be triggered from a seperate task
+or even thread, since the current task is blocked on asynchronously waiting for
+the IO to complete. Therefore this method would need to be thread-safe, and
+some more research around it's exact signature would be required.
+
+Consumers of the trait would typically not be confronted with the `unsafe`
+nature of this trait. They would instead using `async` functions which are added
+via an extension trait, similar to the already existing
+[AsyncWriteExt](https://docs.rs/futures/0.3.4/futures/io/trait.AsyncWriteExt.html).
+
+Thereby application code would simply look like:
+
+```rust
+fn write_all_and_close(
+    writer: &mut dyn AsyncRunToCompletionWrite,
+    data: &[u8],
+    cancel_token: &CancellationToken
+) -> Result<(), io::Error> {
+    let mut written = 0;
+    while written != data.len() {
+        let n = writer.write(&data[written..], cancel_token).await?;
+        written += n;
+    }
+    writer.flush(&data[..], cancel_token).await?;
+    writer.close(&data[..], cancel_token).await
+}
+```
+
+## Standarization of `CancellationToken`s
+
+A standardization of `CancellationToken` could also be taken into consideration,
+instead of leaving its definition purely to runtime implementations or other
+independent libraries.
+
+## Extend `Context` with cooperative cancellation support
+
+In order to forward `CancellationToken`s, which allow for cooperative cancellation
+in `#[completion] async fn`s, the
+[`std::task::Context`](https://doc.rust-lang.org/1.42.0/std/task/struct.Context.html)
+type could be extended in order to allow to forward tokens implicitly without
+users having to pass them. This is not strictly necessary, but could improve
+ergonomics.
+
+## Adding support for `defer` or `finally` blocks
+
+Cleanup code inside `defer` or `finally` blocks would work exactly the same
+way for synchronous and asynchronous run to completion functions.
+It can help users to avoid having to write manual scope/drop guards, and thereby
+make it easier to guarantee that cleanup code (incl. async cleanup code) is
+really executed.
