@@ -41,7 +41,7 @@ a flexible and safe fashion.
   issued on a background thread, a signal or interrupt handler,
   or it could be dequeued through a completion port/queue on an arbitrary thread.
 3. We acquire the result of the operation, which finalizes the operation.
-  after this step all resources which had been borrowed for the duratino of the
+  after this step all resources which had been borrowed for the duration of the
   async operation can be reused.
 
 **Example for such operations are:**
@@ -131,7 +131,8 @@ async fn read_n_bytes(buffer: &mut [u8]) -> Result<(), IoError> {
 
 ## Offer protection against accidental returns
 
-For certain functions it is really important that they actually runs to completion.
+For certain functions it is absolutely necessary for correctness that they
+actually runs to completion.
 The reason is typically that the function forms an atomic transaction. If the
 transaction is cancelled in the middle, the objects that this transaction is
 manipulating will end up in an invalid state.
@@ -540,7 +541,10 @@ close the original `Future` trait has some benefits:
   If those did not allow to cancel spawned tasks after starting them, they would
   mainly need to update the accepted type of the `spawn` method to
   `RunToCompletionFuture` and apply the `unsafe` block in order to call `poll`
-  on the Future.
+  on the Future. If Runtimes so far offered a `.cancel()` method for spawned
+  tasks they would need to make sure to either make this a no-op for
+  `RunToCompletionFuture`s or to start a cooperative cancellation sequence when
+  the function is called (e.g. by signalling a `CancellationToken`).
 
 # Drawbacks
 [drawbacks]: #drawbacks
@@ -596,7 +600,15 @@ level primitives like IO completion based socket types would need to be implemen
 by runtime authors - but those will need unsafe code anyway (they need to pass
 raw pointers to underlying C code or the kernel for an amount of time which can
 not be checked by lifetimes). Most users are purely expected to use high level
-`#[completion] async fn`s, which will not require unsafe code. 
+`#[completion] async fn`s, which will not require unsafe code.
+
+We still expect people to write low level `Future`s by hand, for example to
+implement their custom channel type, timer, mutex, etc. However those types
+are typically supposed to be synchronously cancellable, and therefore people would continue to implement `Future`s instead of `RunToCompletionFuture`.
+the main exception here are future types which need to run to completion, like
+wrappers around IO completion operations. These are however unsafe by nature
+and require careful implementation and review. Therefore the `unsafe` attribute
+added here is justified.
 
 # Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
@@ -614,8 +626,9 @@ etc), but not yet in Rust.
 `#[completion] async fn` will also introduce an async function type which behaves
 more similar to normal functions than current `async fn`s do. It might therefore
 have been interesting to see `#[completion] async fn` as the new "default" async
-function type. However this is not possible anymore, since `async fn` is already
-stabilized.
+function type - which might be the mostly used function type used by application
+writers in the end. However this is not possible anymore, since `async fn` is
+already stabilized.
 
 And while the introduction of another type of async function type sounds like
 as an additional complexity at first, it also has its benefits:
@@ -627,7 +640,14 @@ do not require run-to-completion semantics - e.g. async Channels, Mutexes and
 Semaphores and Timers do very well without them. We might even prefer to cancel
 those operations at any time. Only the operations which require run-to-completion
 semantics can depend on them - and are still able to use other operations
-internally. 
+internally.
+
+Therefore the proposal could also be seens as "providing the best of both worlds":
+Users are still able to make use of synchronous cancellation in places where it
+is safe and makes sense - which is a feature unique to Rusts `async fn`
+implementation. However they will also have to be ability to specify that their
+code needs to be run to completion if this is required for correctness of their
+application or library.
 
 ## Relation to `poll_drop`
 
@@ -766,6 +786,11 @@ All `poll` functions would become unsafe. Their new contract is here also that
 callers must call `poll` exactly with the same data until `Poll::Ready` is
 returned. Callers are not allowed to drop the object before the pending IO
 operation had been completed.
+
+While this sounds "complicated to get right", we should remind ourself that
+e.g. current-generation TLS libraries like OpenSSL or S2N already make use of
+similar APIs, and require the caller to repeat passing the same buffer until
+`EAGAIN` is no longer returned.
 
 In order to support cooperative cancellation some kind of cancel method can be
 added. The implementation of this could for example forward the cancellation
