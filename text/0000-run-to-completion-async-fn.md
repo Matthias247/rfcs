@@ -672,6 +672,16 @@ mechanism.
 methods will run to completion, and any necessary cleanup code is run before 
 resources are released.
 
+`poll_drop` and `#[completion] async fn` are also similar in the sense that they
+both require some `Future`s to be rewritten to support proper cleanup. The
+main difference here is that `#[completion] async fn` only requires new `Future`s
+that want to support running to completion to be rewritten, and will enforce
+this constraint through Rusts type system. `poll_drop` in comparison would require
+potentially every existing `Future` and `Future`-combinator to be changed, in
+order to provide a similary high guarantee of async cleanup code being performed.
+
+There exists also the possibility to introduce a combination of both proposals:
+
 Since `RunToCompletionFuture` is a new trait, it would be possible to add
 `fn poll_drop(self: Pin<&mut Self>)` on this trait, and enforce users to of the
 trait to use it: The `unsafe` contract in the trait could require callers to
