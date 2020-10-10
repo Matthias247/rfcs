@@ -732,6 +732,27 @@ the Rust 2018 rules. The attribute based differentiation seems to be allowed
 according to the understand of the author, while a new keyword like `completion`
 is problematic.
 
+One early feedback for the RFC was that the attribute could also carry a boolean
+flag on whether completion is supported or not:
+
+```rust
+#[completion(true)]
+async fn runs_to_completion()
+
+#[completion(false)]
+async fn is_synchronously_cancellable()
+```
+
+This might be helpful for code generators as well as the compiler,
+since the completion property mainly becomes a flag which needs to be carried
+forward. Normal (attribute-less) `async fn`s would implicitly gain a
+`#[completion(false)]` attribute. However this shouldn't be a necessarity to
+enable the feature.
+
+Another early feedback was that postfix keywords might be allowed within the
+current grammar, so that `async completion fn` could be an alternative to the
+attribute. This would need to be verified.
+
 ## Sub-typing relationships between `Future` and `RunToCompletionFuture`
 
 This RFC leaves it open whether there should be a type relation between
