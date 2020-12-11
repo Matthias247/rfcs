@@ -649,6 +649,35 @@ implementation. However they will also have to be ability to specify that their
 code needs to be run to completion if this is required for correctness of their
 application or library.
 
+## Omission of cancellation in the new `RunToCompletionFuture` type
+
+The proposal outlined here does not prescribe how cancellation is performed.
+It only mandates a "cancellation signal", and recommends cancelled asynchronous
+functions to observe and react to those.
+
+Alternative proposals, like the one in
+https://internals.rust-lang.org/t/pre-pre-rfc-unsafe-futures, also proposed to
+directly add a `.cancel()` method on the new `Future` type which needs to initiate
+the cancellation.
+
+As already discussed in other ecosystems
+[like the Javascript one](https://github.com/tc39/proposal-cancelable-promises),
+cancellation support inside Future/Promise types as well as via additional objects
+are viable paths for achieving the end goal of gracefully cancellable async methods.
+
+The main reason that this proposal does prefer to keep cancellation out of scope
+is to keep as close as possible to synchronous functions as possible. Those do
+not have a standardized cancellation intitiation mechansim either.
+
+A `CancellationToken/StopToken` can be standardized via a separate RFC, e.g.
+in a similiar form that C++ introduced via
+[`std::stop_token`](https://en.cppreference.com/w/cpp/thread/stop_token) and
+[P0660R9](http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p0660r9.pdf).
+
+A single standardized `stop_token` could cover the cancellation of asynchronous
+tasks as well as synchronous threads, and thereby also allow to gracefully
+shut down subsytems which make use of both.
+
 ## Relation to `poll_drop`
 
 A proposal which might be related is the one about
