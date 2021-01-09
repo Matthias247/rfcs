@@ -506,7 +506,7 @@ pub trait RunToCompletionFuture {
     /// returned `Pending`, the caller **must** call `poll()` again later,
     /// until it returns `Ready`.
     ///
-    /// Callers are not allowed `drop()` a future which returned `Pending` as
+    /// Callers are not allowed to `drop()` a future which returned `Pending` as
     /// its last poll result. Futures are only allowed to be dropped if they
     /// either had never been polled, or if the last `poll()` call returned `Ready`.
     unsafe fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output>;
