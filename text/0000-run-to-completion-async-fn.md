@@ -335,7 +335,7 @@ async fn func_with_cancellation_support(
                 println!("Received value: {:?}", val);
                 last_value = Some(val);
             },
-            _ = cancel_token.cancel_notification().await => {
+            _ = cancel_token.cancel_notification() => {
                 // This method was cancelled. Return the last received result
                 return last_value;
             }
